@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# =============================================================================
+# pre-commit hook - Enhanced TDD Workflow
+# Purpose: Before each commit, analyze changed files and run impacted tests
+#          to prevent breaking existing functionality
+# =============================================================================
+
+set -euo pipefail
+
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$HOOK_DIR/.." && pwd)"
+
+log() { echo "[pre-commit] $*"; }
+
+# ── Skip conditions ──────────────────────────────────────────────────────────
+
+# Allow skipping via environment variable (e.g., TDD_SKIP=1 git commit ...)
+if [[ "${TDD_SKIP:-0}" == "1" ]]; then
+    log "TDD check skipped (TDD_SKIP=1)"
+    exit 0
+fi
+
+# Skip during merge commits
+if [[ -f "$PROJECT_ROOT/.git/MERGE_HEAD" ]]; then
+    log "Merge commit detected, skipping TDD check"
+    exit 0
+fi
+
+# Skip during rebase
+if [[ -d "$PROJECT_ROOT/.git/rebase-merge" ]] || [[ -d "$PROJECT_ROOT/.git/rebase-apply" ]]; then
+    log "Rebase detected, skipping TDD check"
+    exit 0
+fi
+
+# ── Step 1: Get changed files ────────────────────────────────────────────────
+
+changed_files=$(git diff --cached --name-only --diff-filter=ACM)
+
+if [[ -z "$changed_files" ]]; then
+    log "No staged files, nothing to check"
+    exit 0
+fi
+
+# Filter to only Java source files (skip test files, configs, etc.)
+java_sources=$(echo "$changed_files" | grep -E '\.java$' | grep -v '/src/test/' || true)
+
+if [[ -z "$java_sources" ]]; then
+    log "No Java source files changed, skipping TDD check"
+    exit 0
+fi
+
+log "Changed Java sources:"
+echo "$java_sources" | while read -r f; do log "  $f"; done
+
+# ── Step 2: Analyze impact ───────────────────────────────────────────────────
+
+if [[ ! -x "$HOOK_DIR/tdd-impact-analyzer.sh" ]]; then
+    log "ERROR: tdd-impact-analyzer.sh not found or not executable"
+    exit 1
+fi
+
+impacted_tests=$(echo "$java_sources" | "$HOOK_DIR/tdd-impact-analyzer.sh")
+
+if [[ -z "$impacted_tests" ]]; then
+    log "No impacted tests found, commit proceeds"
+    exit 0
+fi
+
+log "Impacted tests: $impacted_tests"
+
+# ── Step 3: Run impacted tests ───────────────────────────────────────────────
+
+if [[ ! -x "$HOOK_DIR/tdd-test-runner.sh" ]]; then
+    log "ERROR: tdd-test-runner.sh not found or not executable"
+    exit 1
+fi
+
+log "Running impacted tests before commit..."
+echo ""
+
+if "$HOOK_DIR/tdd-test-runner.sh" "$impacted_tests"; then
+    echo ""
+    log "All impacted tests passed. Commit proceeds."
+    exit 0
+else
+    echo ""
+    log "BLOCKED: Impacted tests failed. Fix before committing."
+    log "To skip this check: TDD_SKIP=1 git commit ..."
+    exit 1
+fi
